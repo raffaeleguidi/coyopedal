@@ -39,6 +39,8 @@ extern "C" bool coyopedal_nam_bank_arena_owns_ptr(const void* block);
 
 #include "audio/processor.hpp"
 #include "usb_audio.h"
+#include "usb_midi.h"
+#include "status_led.h"
 #include "remote_service.h"
 #include "model_catalog.h"
 #include "factory_presets.h"
@@ -258,12 +260,22 @@ esp_err_t pmu_init();
 namespace {
 
 constexpr gpio_num_t kModeButtonGpio = GPIO_NUM_0;
-constexpr std::uint32_t kModeButtonStackBytes = 2048U;
-// BOOT is a footswitch on every board: a tap toggles bypass on release, while a
-// hold switches between audio and maintenance the instant it reaches the
+// A tap can recall a preset, and a preset whose profile differs reloads the NAM
+// model on this task. That path parses the model and runs deep enough that 2048
+// bytes overflowed: the USB interrupt then arrived on the same nearly full
+// stack and took the board down with LoadProhibited. The stack is in PSRAM, so
+// the headroom costs the audio graph nothing.
+constexpr std::uint32_t kModeButtonStackBytes = 8192U;
+// BOOT is the only control a headless board has, so it carries three gestures:
+// a tap steps to the next preset, a double tap toggles the overdrive block, and
+// a hold switches between audio and maintenance the instant it reaches the
 // threshold. The mode switch cannot wait for the release: nothing would happen
 // at 1500ms, so a player with no feedback keeps pressing for several seconds.
 constexpr std::uint32_t kModeButtonHoldMs = 1500U;
+// How long after a tap a second one still counts as a double tap. Long enough to
+// be playable under a foot, short enough that the preset change a single tap
+// asked for is not felt as a delay.
+constexpr std::uint32_t kDoubleTapWindowMs = 400U;
 // A mode switch reboots. GPIO0 is also the boot strapping pin, so the reboot
 // has to wait for the release; this bounds that wait for a stuck contact.
 constexpr std::uint32_t kModeButtonReleaseTimeoutMs = 10000U;
@@ -283,6 +295,44 @@ void IRAM_ATTR mode_button_isr(void*) {
     if (higher_priority_woken == pdTRUE) {
         portYIELD_FROM_ISR();
     }
+}
+
+// One tap, one step through the factory presets. The control model carries the
+// index that is actually loaded, so a tap after a MIDI recall or a maintenance
+// round trip continues from there rather than from a remembered guess.
+void step_preset() {
+    const unsigned count = coyopedal_preset_count();
+    if (count == 0U) {
+        return;
+    }
+    coyopedal_control_state_t state{};
+    coyopedal_ui_control_state(&state);
+    const unsigned current = state.preset < count ? state.preset : count - 1U;
+    const unsigned next = (current + 1U) % count;
+    if (coyopedal_ui_control_load_preset(next)) {
+        ESP_LOGI(kTag, "BOOT tap: preset %u of %u", next + 1U, count);
+        // One blink per preset number, so the player can count them.
+        status_led_blink(next + 1U);
+    } else {
+        ESP_LOGW(kTag, "BOOT tap: preset %u failed", next);
+    }
+#if !defined(GEA_EMBEDDED_NO_DISPLAY) || !GEA_EMBEDDED_NO_DISPLAY
+    s3_v1_ui_wake();
+#endif
+}
+
+// The overdrive block, through the same control call the panel and the remote
+// API use, so the two never disagree about what is engaged.
+void toggle_overdrive() {
+    const bool enable = !coyopedal_fx_enabled(COYOPEDAL_FX_OVERDRIVE);
+    if (coyopedal_ui_control_set_enabled(COYOPEDAL_FX_OVERDRIVE, enable)) {
+        ESP_LOGI(kTag, "BOOT double tap: overdrive %s", enable ? "on" : "off");
+    } else {
+        ESP_LOGW(kTag, "BOOT double tap: overdrive toggle failed");
+    }
+#if !defined(GEA_EMBEDDED_NO_DISPLAY) || !GEA_EMBEDDED_NO_DISPLAY
+    s3_v1_ui_wake();
+#endif
 }
 
 void mode_button_task(void*) {
@@ -309,21 +359,37 @@ void mode_button_task(void*) {
             vTaskDelay(pdMS_TO_TICKS(10));
             held_ms += 10U;
         }
-        // A press that already asked for a mode change is not also a tap.
-        if (!switched && coyopedal_remote_audio_mode() && !coyopedal_remote_mode_busy()) {
-            // The same call the on-screen footswitch makes, so the control model
-            // and the remote API see one kind of engage, not two.
-            coyopedal_control_state_t state{};
-            coyopedal_ui_control_state(&state);
-            const bool engage = state.engaged == 0U;
-            (void)coyopedal_ui_control_set_engaged(engage);
-#if !defined(GEA_EMBEDDED_NO_DISPLAY) || !GEA_EMBEDDED_NO_DISPLAY
-            s3_v1_ui_wake();
-#endif
-            ESP_LOGI(kTag, "BOOT tap: pedal %s", engage ? "engaged" : "bypassed");
+        if (switched) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            gpio_intr_enable(kModeButtonGpio);
+            continue;
         }
-        // Re-arm the edge after the release bounce; re-enabling on a still
-        // ringing contact would queue a phantom press that toggles straight back.
+        // A tap. Re-arm the edge after the release bounce and give a second
+        // press a moment to arrive: two taps toggle overdrive, one steps the
+        // preset.
+        vTaskDelay(pdMS_TO_TICKS(50));
+        gpio_intr_enable(kModeButtonGpio);
+        bool double_tap = false;
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kDoubleTapWindowMs)) > 0) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            if (gpio_get_level(kModeButtonGpio) == 0) {
+                double_tap = true;
+                gpio_intr_disable(kModeButtonGpio);
+                while (gpio_get_level(kModeButtonGpio) == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+            }
+            // A notification without a press behind it is contact bounce, and
+            // falls through as the single tap it really was.
+        }
+        if (coyopedal_remote_audio_mode() && !coyopedal_remote_mode_busy()) {
+            if (double_tap) {
+                toggle_overdrive();
+            } else {
+                step_preset();
+            }
+        }
+        // Re-enabling on a still ringing contact would queue a phantom press.
         vTaskDelay(pdMS_TO_TICKS(50));
         gpio_intr_enable(kModeButtonGpio);
     }
@@ -958,6 +1024,12 @@ extern "C" void gea_app_native_boot(void) {
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
     usb_audio_start();
+    // The foot switches arrive as MIDI on the same device. It is a separate
+    // host client at a lower priority, so this cannot delay the audio client's
+    // completions; it claims only the MIDIStreaming interface.
+    usb_midi_start();
+    // The headless board's only preset feedback.
+    status_led_start();
     // Both cores are real-time from here on, so an idle task can go seconds
     // without running. The task watchdog's report on a starved idle task is
     // printed from interrupt context and costs stage A a block each time, so

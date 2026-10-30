@@ -87,7 +87,8 @@
           "sdmmc",
           "esp_driver_sdmmc",
           "esp_driver_gpio",
-          "esp_driver_i2c"
+          "esp_driver_i2c",
+          "esp_driver_rmt"
         ],
         "linkOptions": [
           "-Wl,--wrap=tlsf_memalign_offs",
@@ -378,6 +379,8 @@
       "src/native/drivers/flash_storage.cpp",
       "src/native/drivers/power.cpp",
       "src/native/drivers/usb_audio.cpp",
+      "src/native/drivers/usb_midi.cpp",
+      "src/native/drivers/status_led.cpp",
       "src/native/drivers/usb_host_hooks.cpp",
       "src/native/audio/s3_dsp_control.cpp",
       "src/native/audio/s3_pcm_pack.S",
@@ -430,7 +433,6 @@
       "GEA_EMBEDDED_TOUCH_TASK_PRIORITY": 17,
       "GEA_SCROLL_TRACE": 0,
       "GEA_EMBEDDED_FRAME_SCHEDULER_FPS_LOG": 0,
-      "GEA_EMBEDDED_RUNTIME_TASK_STACK_BYTES": 20480,
       "GEA_EMBEDDED_RUNTIME_TASK_STACK_EXTERNAL": 1,
       "GEA_EMBEDDED_DISPLAY_SOFTWARE_LANDSCAPE_PRIMARY": 1,
       "GEA_EMBEDDED_DISPLAY_ROTATE_LANDSCAPE": 1,
@@ -447,8 +449,7 @@
       "GEA_EMBEDDED_DISPLAY_FLUSH_QUEUE_DEPTH_LIMIT": 2,
       "GEA_EMBEDDED_DEFAULT_FRAME_INTERVAL_US": 66667,
       "GEA_EMBEDDED_DISPLAY_INTERNAL_RESERVE_BYTES": 0,
-      "GEA_EMBEDDED_MAX_NODES": 160,
-      "GEA_BOARD_HAS_POWER": 1
+      "GEA_EMBEDDED_MAX_NODES": 160
     },
     "cssDevicePixelRatio": 2
   },

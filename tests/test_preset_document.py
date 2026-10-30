@@ -144,16 +144,21 @@ class ShippedDocument(unittest.TestCase):
         for preset in self.document["presets"]:
             self.assertIn(preset["profile"], library)
 
-    def test_third_preset_pairs_an_amp_only_capture_with_an_embedded_cabinet(self):
+    def test_shipped_presets_use_the_full_rig_capture(self):
+        # Both shipped presets are built on the same full-rig capture -- amp and
+        # cabinet in one file -- which is also why switching between them needs no
+        # model reload. A preset that paired an amp-only capture with an external
+        # IR would carry a "cabinet" block; none does.
         library = {entry["id"]: entry for entry in json.loads(MANIFEST.read_text())}
-        third = self.document["presets"][2]
-        self.assertEqual(library[third["profile"]]["gearType"], "amp")
-        self.assertEqual(
-            third["cabinet"], {"path": "Factory/V30 SM57.wav", "enabled": True, "level": 0}
-        )
-        for preset in self.document["presets"][:2]:
+        self.assertTrue(self.document["presets"])
+        for preset in self.document["presets"]:
             self.assertEqual(library[preset["profile"]]["gearType"], "amp_cab")
             self.assertFalse(preset.get("cabinet", {}).get("enabled", False))
+
+    def test_factory_irs_stay_embedded_for_amp_only_captures(self):
+        # The library still ships amp-only captures, and a preset that picks one
+        # needs an IR to go with it: the three CC0 cabinet IRs have to stay in the
+        # image even though no shipped preset names them.
         embedded = json.loads((ROOT / "package.json").read_text())["gea"]["targets"]["esp32"][
             "embedFiles"
         ]
